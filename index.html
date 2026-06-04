@@ -10,22 +10,37 @@
 <title>Casa P&M</title>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+  import { getDatabase, ref, set, onValue, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
-  const firebaseConfig = {
-    databaseURL: "https://casa-pm-default-rtdb.europe-west1.firebasedatabase.app"
-  };
-  const app = initializeApp(firebaseConfig);
-  const db = getDatabase(app);
+  try {
+    const firebaseConfig = {
+      databaseURL: "https://casa-pm-default-rtdb.europe-west1.firebasedatabase.app"
+    };
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+    const dataRef = ref(db, "casapm");
 
-  // Expose to global scope for use in non-module JS
-  window._fbSet = (data) => set(ref(db, "data"), data);
-  window._fbListen = (cb) => onValue(ref(db, "data"), snap => {
-    const val = snap.val();
-    if (val) cb(val);
-  });
-  window._fbReady = true;
-  document.dispatchEvent(new Event("fb-ready"));
+    window._fbSet = async (data) => {
+      await set(dataRef, { ...data, ts: Date.now() });
+    };
+    window._fbListen = (cb) => {
+      onValue(dataRef, snap => {
+        const val = snap.val();
+        if (val) cb(val);
+      }, err => {
+        console.error("Firebase listen error:", err);
+        window._fbError = err.message;
+        const el = document.getElementById("sync-status");
+        if (el) el.textContent = "⚠️ " + err.message;
+      });
+    };
+    window._fbReady = true;
+    console.log("Firebase initialized OK");
+    document.dispatchEvent(new Event("fb-ready"));
+  } catch(e) {
+    console.error("Firebase init error:", e);
+    window._fbError = e.message;
+  }
 </script>
 
 <!-- App icon (base64 SVG → PNG via canvas trick) -->
@@ -303,6 +318,7 @@
           <div class="sync-dot" id="sync-indicator"></div>
           <span id="h-balance">✓ Al día</span>
         </div>
+        <div id="sync-status" style="font-size:9px;color:#444;text-align:right;margin-top:2px;font-family:monospace;"></div>
       </div>
     </div>
     <div id="month-bar" onclick="toggleMonthDropdown()">
@@ -333,7 +349,7 @@
 const PIN = "1111";
 const FIREBASE_URL = "https://casa-pm-default-rtdb.europe-west1.firebasedatabase.app";
 const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
-const CATEGORIAS = [
+const CATEGORIAS_BASE = [
   {id:"casa",        label:"Varios Casa",  emoji:"🏠", color:"#C17D3C"},
   {id:"alimentacion",label:"Alimentación", emoji:"🛒", color:"#4A8C5C"},
   {id:"farmacia",    label:"Farmacia",     emoji:"💊", color:"#B85450"},
@@ -342,12 +358,19 @@ const CATEGORIAS = [
   {id:"otros",       label:"Otros",        emoji:"📦", color:"#6B8E6B"},
   {id:"regalos",     label:"Regalos",      emoji:"🎁", color:"#C4756A"},
 ];
+const CAT_COLORS = ["#C17D3C","#4A8C5C","#B85450","#7B68B5","#3A7CA5","#6B8E6B","#C4756A","#8C6BAF","#5A8C7C","#A08C3C"];
+const CAT_EMOJIS = ["🏠","🛒","💊","👶","🎉","📦","🎁","🚗","✈️","💼","🏋️","🐾","🏥","📚","🎓","💅","🎸","⚽"];
+function getCategorias() {
+  const custom = state.customCats || [];
+  return [...CATEGORIAS_BASE, ...custom];
+}
 const PERSONAS = [
   {id:"paulo",  label:"Paulo",  emoji:"👨", color:"#7EC8E3"},
   {id:"miriam", label:"Miriam", emoji:"👩", color:"#F0A0A0"},
   {id:"abuelo", label:"Abuelo", emoji:"👴", color:"#888"},
 ];
-const TABS = [{id:"resumen",label:"Resumen",emoji:"📊",color:"#C17D3C"}, ...CATEGORIAS, {id:"vacaciones",label:"Vacaciones",emoji:"✈️",color:"#3A7CA5"}];
+const TABS_FIXED = [{id:"resumen",label:"Resumen",emoji:"📊",color:"#C17D3C"}];
+const TABS_END = [{id:"vacaciones",label:"Vacaciones",emoji:"✈️",color:"#3A7CA5"},{id:"gestionar",label:"Gestionar",emoji:"⚙️",color:"#555"}];
 
 const SEED_MONTH = () => ({
   gastos:{casa:[
@@ -376,13 +399,10 @@ let state = {
   currentKey: null,
   activeTab: "resumen",
   editId: null,
-  editSection: null, // 'gastos' or 'vac'
+  editSection: null,
   newRow: {concepto:"", importe:"", persona:"paulo"},
   syncing: false,
-  apiKey: null,
-  binId: null,
-  offline: false,
-  pollTimer: null,
+  customCats: [],
 };
 
 function nowKey() {
@@ -395,11 +415,16 @@ function personColor(id) { return id==="paulo"?"#7EC8E3":id==="miriam"?"#F0A0A0"
 
 // ── LOCAL STORAGE ────────────────────────────────────────────────────────────
 function saveLocal() {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(state.months)); } catch(e){}
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(state.months));
+    localStorage.setItem(LS_KEY+"_cats", JSON.stringify(state.customCats||[]));
+  } catch(e){}
 }
 function loadLocal() {
   try {
     const raw = localStorage.getItem(LS_KEY);
+    const cats = localStorage.getItem(LS_KEY+"_cats");
+    if (cats) state.customCats = JSON.parse(cats);
     if (raw) return JSON.parse(raw);
   } catch(e){}
   return null;
@@ -633,7 +658,9 @@ function createMonth() {
   const y = document.getElementById("nm-year").value;
   const key = `${y}-${String(parseInt(m)+1).padStart(2,"0")}`;
   if (!state.months[key]) {
-    state.months[key] = EMPTY_MONTH();
+    const em = EMPTY_MONTH();
+    (state.customCats||[]).forEach(c => { em.gastos[c.id] = []; });
+    state.months[key] = em;
   }
   state.currentKey = key;
   state.activeTab = "resumen";
@@ -668,9 +695,10 @@ function renderHeader() {
 
 function renderTabs() {
   const tabs = document.getElementById("tabs");
+  const TABS = [...TABS_FIXED, ...getCategorias(), ...TABS_END];
   tabs.innerHTML = TABS.map(tab => {
     const isActive = state.activeTab === tab.id;
-    const ct = CATEGORIAS.find(c=>c.id===tab.id) ? catTotals(tab.id) : null;
+    const ct = getCategorias().find(c=>c.id===tab.id) ? catTotals(tab.id) : null;
     const extra = ct && ct.total > 0 ? ` · ${fmt(ct.total)}` : "";
     return `<button class="tab-btn${isActive?" active":""}"
       style="${isActive?`background:${tab.color};`:""}"
@@ -693,8 +721,9 @@ function renderContent() {
   if (state.activeTab === "resumen") el.innerHTML = renderResumen();
   else if (state.activeTab === "vacaciones") el.innerHTML = renderVacaciones();
   else {
-    const cat = CATEGORIAS.find(c=>c.id===state.activeTab);
-    if (cat) el.innerHTML = renderCategory(cat);
+    const cat = getCategorias().find(c=>c.id===state.activeTab);
+  if (state.activeTab === "gestionar") el.innerHTML = renderGestionar();
+  else if (cat) el.innerHTML = renderCategory(cat);
   }
 }
 
@@ -721,7 +750,7 @@ function renderResumen() {
     </div>
   </div>`;
 
-  CATEGORIAS.forEach(cat => {
+  getCategorias().forEach(cat => {
     const ct = catTotals(cat.id);
     if (ct.total === 0) return;
     const barP = ct.total>0?(ct.paulo/ct.total)*100:0;
@@ -921,6 +950,7 @@ function addGasto(catId) {
   const imp = parseFloat(String(state.newRow.importe).replace(",","."));
   if (!state.newRow.concepto || isNaN(imp) || imp < 0) return;
   const data = currentData();
+  if (!data.gastos[catId]) data.gastos[catId] = [];
   data.gastos[catId].push({id:uid(), concepto:state.newRow.concepto, importe:imp, persona:state.newRow.persona});
   state.newRow = {concepto:"", importe:"", persona:"paulo"};
   saveData(data);
@@ -940,6 +970,78 @@ function updateMiriamPagado(val) {
   const data = currentData();
   data.vacaciones.miriamPagado = parseFloat(val)||0;
   saveData(data);
+}
+
+// ── GESTIONAR CATEGORÍAS ─────────────────────────────────────────────────────
+function renderGestionar() {
+  const custom = state.customCats || [];
+  const emojiOpts = CAT_EMOJIS.map(e => `<option value="${e}">${e}</option>`).join("");
+  const colorOpts = CAT_COLORS.map(c => `<option value="${c}" style="background:${c}">${c}</option>`).join("");
+
+  const customRows = custom.map((cat,i) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #141428;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-size:18px">${cat.emoji}</span>
+        <span style="font-size:13px;color:#C8C0B0;">${cat.label}</span>
+        <span style="width:10px;height:10px;border-radius:50%;background:${cat.color};display:inline-block;"></span>
+      </div>
+      <button onclick="deleteCat('${cat.id}')" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.5;">🗑️</button>
+    </div>`).join("");
+
+  return `
+  <div class="card" style="margin-bottom:10px;">
+    <div style="padding:16px;">
+      <div class="card-label" style="color:#555;margin-bottom:14px;">⚙️ CATEGORÍAS PERSONALIZADAS</div>
+      <div style="font-size:12px;color:#666;margin-bottom:14px;">Añade las categorías que necesites. Aparecerán como pestañas nuevas.</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;background:#070718;padding:10px;border-radius:10px;">
+        <select id="new-cat-emoji" class="add-select" style="width:60px;font-size:18px;">${emojiOpts}</select>
+        <input id="new-cat-name" class="add-input wide" placeholder="Nombre (ej: Coche)" style="flex:2;min-width:100px;">
+        <select id="new-cat-color" class="add-select">
+          ${CAT_COLORS.map(c=>`<option value="${c}">■ ${c}</option>`).join("")}
+        </select>
+        <button onclick="addCat()" style="background:var(--gold);color:#fff;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;font-size:16px;font-weight:bold;">+</button>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><div class="card-label" style="color:#555;">MIS CATEGORÍAS</div></div>
+    ${custom.length===0?'<div class="empty">Sin categorías personalizadas aún</div>':""}
+    ${customRows}
+    <div style="padding:12px 16px;border-top:1px solid #141428;">
+      <div class="card-label" style="color:#333;margin-bottom:8px;">CATEGORÍAS FIJAS</div>
+      ${CATEGORIAS_BASE.map(c=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;">
+          <span>${c.emoji}</span>
+          <span style="font-size:12px;color:#444;">${c.label}</span>
+        </div>`).join("")}
+    </div>
+  </div>`;
+}
+
+function addCat() {
+  const emoji = document.getElementById("new-cat-emoji").value;
+  const label = document.getElementById("new-cat-name").value.trim();
+  const color = document.getElementById("new-cat-color").value;
+  if (!label) return;
+  const id = "custom_" + uid();
+  if (!state.customCats) state.customCats = [];
+  state.customCats.push({id, label, emoji, color});
+  // Also add empty gastos array to all months
+  Object.keys(state.months).forEach(k => {
+    if (!state.months[k].gastos[id]) state.months[k].gastos[id] = [];
+  });
+  document.getElementById("new-cat-name").value = "";
+  saveLocal();
+  syncToServer();
+  renderAll();
+}
+
+function deleteCat(id) {
+  state.customCats = (state.customCats||[]).filter(c=>c.id!==id);
+  saveLocal();
+  syncToServer();
+  if (state.activeTab === id) state.activeTab = "resumen";
+  renderAll();
 }
 
 // ── ICON GENERATION ──────────────────────────────────────────────────────────
