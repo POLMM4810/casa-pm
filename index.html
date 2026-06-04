@@ -8,6 +8,25 @@
 <meta name="apple-mobile-web-app-title" content="Casa P&M">
 <meta name="mobile-web-app-capable" content="yes">
 <title>Casa P&M</title>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    databaseURL: "https://casa-pm-default-rtdb.europe-west1.firebasedatabase.app"
+  };
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // Expose to global scope for use in non-module JS
+  window._fbSet = (data) => set(ref(db, "data"), data);
+  window._fbListen = (cb) => onValue(ref(db, "data"), snap => {
+    const val = snap.val();
+    if (val) cb(val);
+  });
+  window._fbReady = true;
+  document.dispatchEvent(new Event("fb-ready"));
+</script>
 
 <!-- App icon (base64 SVG → PNG via canvas trick) -->
 <link rel="apple-touch-icon" id="appicon">
@@ -312,10 +331,7 @@
 <script>
 // ── CONFIG ──────────────────────────────────────────────────────────────────
 const PIN = "1111";
-// Sync via GitHub Gist (set GIST_ID and GIST_TOKEN after creating gist)
-// Leave empty to use localStorage only
-const GIST_ID = "";
-const GIST_TOKEN = "";
+const FIREBASE_URL = "https://casa-pm-default-rtdb.europe-west1.firebasedatabase.app";
 const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 const CATEGORIAS = [
   {id:"casa",        label:"Varios Casa",  emoji:"🏠", color:"#C17D3C"},
@@ -399,20 +415,19 @@ function loadConfig() {
   return null;
 }
 
-// ── GITHUB GIST SYNC ────────────────────────────────────────────────────────
+// ── FIREBASE SYNC ────────────────────────────────────────────────────────────
 async function syncFromServer() {
-  if (!GIST_ID || !GIST_TOKEN) return;
+  if (!FIREBASE_URL) return;
   try {
-    const r = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-      headers: { "Authorization": `token ${GIST_TOKEN}`, "Accept": "application/vnd.github.v3+json" }
-    });
+    const r = await fetch(`${FIREBASE_URL}/data.json`);
     if (!r.ok) return;
     const data = await r.json();
-    const raw = data.files?.["casa-pm.json"]?.content;
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed.months) {
-        state.months = parsed.months;
+    if (data && data.months) {
+      // Only update if server data is newer
+      const serverStr = JSON.stringify(data.months);
+      const localStr = JSON.stringify(state.months);
+      if (serverStr !== localStr) {
+        state.months = data.months;
         saveLocal();
         renderAll();
       }
@@ -421,13 +436,13 @@ async function syncFromServer() {
 }
 
 async function syncToServer() {
-  if (!GIST_ID || !GIST_TOKEN) return;
+  if (!FIREBASE_URL) return;
   setSyncing(true);
   try {
-    await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-      method: "PATCH",
-      headers: { "Authorization": `token ${GIST_TOKEN}`, "Accept": "application/vnd.github.v3+json", "Content-Type": "application/json" },
-      body: JSON.stringify({ files: { "casa-pm.json": { content: JSON.stringify({ months: state.months }) } } })
+    await fetch(`${FIREBASE_URL}/data.json`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ months: state.months })
     });
   } catch(e) { console.warn("Sync write error:", e); }
   finally { setSyncing(false); }
@@ -447,7 +462,7 @@ function setSyncing(v) {
 
 function startPolling() {
   if (state.pollTimer) clearInterval(state.pollTimer);
-  state.pollTimer = setInterval(syncFromServer, 5000);
+  state.pollTimer = setInterval(syncFromServer, 6000);
 }
 
 // ── INIT ─────────────────────────────────────────────────────────────────────
@@ -459,7 +474,12 @@ function launchApp() {
   if (!state.months[state.currentKey]) state.months[state.currentKey] = SEED_MONTH();
   document.getElementById("app").className = "visible";
   renderAll();
-  if (!state.offline) startPolling();
+  // Start Firebase listener when ready
+  if (window._fbReady) {
+    startFirebaseListener();
+  } else {
+    document.addEventListener("fb-ready", () => startFirebaseListener(), { once: true });
+  }
 }
 
 // ── PIN ──────────────────────────────────────────────────────────────────────
@@ -515,7 +535,8 @@ function unlockApp() {
     saveLocal();
   }
   launchApp();
-  if (GIST_ID && GIST_TOKEN) syncFromServer();
+  // Always sync from Firebase on login
+  syncFromServer();
 }
 
 // ── DATA HELPERS ─────────────────────────────────────────────────────────────
