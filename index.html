@@ -117,6 +117,16 @@ input, select, textarea, input::placeholder {
   border-radius: 8px;
 }
 select option { background: #16162A !important; color: #E8E0D0 !important; }
+
+/* Face ID button */
+.faceid-btn{margin-top:20px;background:none;border:1.5px solid #2A2A40;border-radius:14px;padding:12px 28px;color:#888;font-size:13px;font-family:Georgia,serif;cursor:pointer;display:flex;align-items:center;gap:8px;transition:all .2s;}
+.faceid-btn:active{background:#1A1A2E;}
+.faceid-btn.available{border-color:var(--gold);color:var(--gold);}
+
+/* Undo panel */
+#undo-panel{position:fixed;bottom:80px;right:12px;left:12px;max-width:340px;margin:0 auto;background:#0E0E22;border:1px solid #2A2A40;border-radius:14px;padding:12px 14px;z-index:999;opacity:0;transition:opacity .3s;pointer-events:none;box-shadow:0 4px 20px rgba(0,0,0,.5);}
+#undo-panel.show{opacity:1;pointer-events:auto;}
+
 </style>
 </head>
 <body>
@@ -155,6 +165,10 @@ select option { background: #16162A !important; color: #E8E0D0 !important; }
     </div>
     <input id="pin-field" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="    " style="font-size:32px;letter-spacing:16px;width:180px;text-align:center;background:#0E0E22;color:#C17D3C;border:1.5px solid #2A2A40;border-radius:14px;padding:14px 20px;caret-color:#C17D3C;outline:none;">
     <div id="pin-err"></div>
+    <button id="faceid-btn" class="faceid-btn" onclick="tryBiometric()" style="display:none;">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3H5a2 2 0 0 0-2 2v2M17 3h2a2 2 0 0 1 2 2v2M7 21H5a2 2 0 0 1-2-2v-2M17 21h2a2 2 0 0 0 2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="M9 9a4 4 0 0 1 6 0M9 15a4 4 0 0 0 6 0"/></svg>
+      Face ID / Touch ID
+    </button>
   </div>
 </div>
 
@@ -341,6 +355,131 @@ function setSyncing(v){
 }
 function setTxt(t){var el=document.getElementById("sync-txt");if(el)el.textContent=t;}
 
+
+// ─── BIOMETRIC (Face ID / Touch ID) ─────────────────────────────────────────
+var CRED_KEY = "pp_cred_id";
+var biometricAvailable = false;
+
+function checkBiometric(){
+  if(!window.PublicKeyCredential){return;}
+  PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(ok){
+    if(!ok)return;
+    biometricAvailable = true;
+    var btn = document.getElementById("faceid-btn");
+    if(btn){btn.classList.add("available");btn.style.display="flex";}
+    var storedId = localStorage.getItem(CRED_KEY);
+    if(storedId){
+      // Auto-try biometric on load
+      setTimeout(function(){tryBiometric();}, 400);
+    }
+  }).catch(function(){});
+}
+
+function tryBiometric(){
+  var storedId = localStorage.getItem(CRED_KEY);
+  if(!storedId || !biometricAvailable){registerBiometric();return;}
+  var idBytes = Uint8Array.from(atob(storedId), function(c){return c.charCodeAt(0);});
+  var challenge = new Uint8Array(32);
+  crypto.getRandomValues(challenge);
+  navigator.credentials.get({publicKey:{
+    challenge: challenge,
+    allowCredentials:[{type:"public-key",id:idBytes,transports:["internal"]}],
+    userVerification:"required",
+    timeout:30000
+  }}).then(function(){
+    unlock();
+  }).catch(function(err){
+    // Silently fail - user can still use PIN
+    console.log("Biometric failed:", err.message);
+  });
+}
+
+function registerBiometric(){
+  if(!biometricAvailable)return;
+  var challenge = new Uint8Array(32);
+  crypto.getRandomValues(challenge);
+  var userId = new Uint8Array(16);
+  crypto.getRandomValues(userId);
+  navigator.credentials.create({publicKey:{
+    challenge: challenge,
+    rp:{name:"Gastos App", id:location.hostname},
+    user:{id:userId, name:"usuario", displayName:"Usuario"},
+    pubKeyCredParams:[{alg:-7,type:"public-key"},{alg:-257,type:"public-key"}],
+    authenticatorSelection:{authenticatorAttachment:"platform",userVerification:"required"},
+    timeout:30000
+  }}).then(function(cred){
+    var idB64 = btoa(String.fromCharCode.apply(null, new Uint8Array(cred.rawId)));
+    localStorage.setItem(CRED_KEY, idB64);
+    unlock();
+  }).catch(function(err){
+    console.log("Register failed:", err.message);
+  });
+}
+
+
+// ─── UNDO (historial del día) ─────────────────────────────────────────────
+var undoHistory = [];  // array de {data, label, ts}
+var undoTimer = null;
+
+function pushUndo(snapshot, label){
+  // Guardar copia del mes actual antes del borrado
+  undoHistory.push({
+    data: JSON.parse(JSON.stringify(snapshot)),
+    label: label,
+    ts: Date.now()
+  });
+  // Limpiar entradas de más de 24h
+  var cutoff = Date.now() - 86400000;
+  undoHistory = undoHistory.filter(function(u){return u.ts > cutoff;});
+  showUndoPanel();
+}
+
+function showUndoPanel(){
+  if(undoTimer)clearTimeout(undoTimer);
+  var panel = document.getElementById("undo-panel");
+  if(!panel){
+    panel = document.createElement("div");
+    panel.id = "undo-panel";
+    document.body.appendChild(panel);
+  }
+  renderUndoPanel(panel);
+  panel.classList.add("show");
+  undoTimer = setTimeout(function(){
+    panel.classList.remove("show");
+  }, 6000);
+}
+
+function renderUndoPanel(panel){
+  if(!panel)return;
+  var items = undoHistory.slice().reverse().slice(0,5); // últimos 5
+  var html = '<div style="font-size:9px;color:#555;letter-spacing:2px;font-family:monospace;margin-bottom:8px;">BORRADOS HOY</div>';
+  items.forEach(function(u, i){
+    var ago = Math.round((Date.now()-u.ts)/1000);
+    var agoStr = ago < 60 ? "ahora" : Math.round(ago/60)+"min";
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1A1A2E;">'
+      +'<span style="font-size:11px;color:#AAA;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+u.label+'</span>'
+      +'<span style="font-size:10px;color:#444;margin:0 8px;">'+agoStr+'</span>'
+      +'<button onclick="doUndo('+( undoHistory.length-1-i)+')" style="background:var(--gold);border:none;border-radius:6px;padding:4px 10px;color:#fff;font-family:Georgia,serif;font-size:11px;cursor:pointer;flex-shrink:0;">↩</button>'
+      +'</div>';
+  });
+  html += '<button onclick="document.getElementById(\'undo-panel\').classList.remove(\'show\')" style="margin-top:8px;width:100%;background:none;border:none;color:#444;font-size:11px;cursor:pointer;font-family:Georgia,serif;">CERRAR</button>';
+  panel.innerHTML = html;
+}
+
+function doUndo(idx){
+  if(idx < 0 || idx >= undoHistory.length)return;
+  if(undoTimer)clearTimeout(undoTimer);
+  S.months[S.curKey] = undoHistory[idx].data;
+  undoHistory.splice(idx, 1); // remove recovered item
+  var panel = document.getElementById("undo-panel");
+  if(undoHistory.length === 0){
+    if(panel)panel.classList.remove("show");
+  } else {
+    renderUndoPanel(panel);
+  }
+  saveLocal(); renderAll(); fbWrite();
+}
+
 // ─── PIN ───────────────────────────────────────────────────────────────────
 (function(){
   var field=document.getElementById("pin-field");
@@ -374,6 +513,7 @@ function setTxt(t){var el=document.getElementById("sync-txt");if(el)el.textConte
   document.getElementById("pin").addEventListener("click",function(e){
     if(e.target!==field)field.focus();
   });
+  checkBiometric();
 })();
 
 function unlock(){
@@ -453,7 +593,7 @@ function renderMList(){
     var div=document.createElement("div");
     div.className="mrow"+(isCur?" cur":"");
     div.innerHTML='<span>'+lbl+'</span>'+(isCur?'<span style="font-size:9px;color:var(--gold);letter-spacing:2px;font-family:monospace;">ACTIVO</span>':'');
-    div.onclick=function(key){return function(){selMonth(key);};}(k);
+    div.onclick=function(key){return function(e){e.stopPropagation();selMonth(key);};}(k);
     mlist.appendChild(div);
   });
 }
@@ -835,10 +975,14 @@ function saveVacEdit(id){
   S.editId=null;saveData(d);
 }
 function delGasto(catId,id){
-  var d=cur();d.gastos[catId]=d.gastos[catId].filter(function(g){return g.id!==id;});saveData(d);
+  var d=cur();var deleted=d.gastos[catId].find(function(g){return g.id===id;});
+  pushUndo(d,"Gasto borrado: "+(deleted?deleted.concepto:""));
+  d.gastos[catId]=d.gastos[catId].filter(function(g){return g.id!==id;});saveData(d);
 }
 function delVac(id){
-  var d=cur();d.vacaciones.lineas=d.vacaciones.lineas.filter(function(l){return l.id!==id;});saveData(d);
+  var d=cur();var deleted=d.vacaciones.lineas.find(function(l){return l.id===id;});
+  pushUndo(d,"Vacaciones borrado: "+(deleted?deleted.concepto:""));
+  d.vacaciones.lineas=d.vacaciones.lineas.filter(function(l){return l.id!==id;});saveData(d);
 }
 function addGasto(catId){
   var imp=parseFloat(String(S.newRow.importe).replace(",","."));
@@ -874,6 +1018,7 @@ function addCat(){
   saveLocal();fbWrite();renderAll();
 }
 function delCat(id){
+  var d=cur();pushUndo(d,"Categoría borrada");
   S.customCats=(S.customCats||[]).filter(function(c){return c.id!==id;});
   if(S.tab===id)S.tab="resumen";
   saveLocal();fbWrite();renderAll();
