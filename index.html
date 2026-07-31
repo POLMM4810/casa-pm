@@ -445,13 +445,17 @@ function toggleMDrop(){
 }
 function renderMList(){
   var keys=Object.keys(S.months).sort().reverse();
-  document.getElementById("mlist").innerHTML=keys.map(function(k){
+  var mlist=document.getElementById("mlist");
+  mlist.innerHTML="";
+  keys.forEach(function(k){
     var p=k.split("-");var lbl=(MESES[parseInt(p[1])-1]+" "+p[0]).toUpperCase();
-    var cur=k===S.curKey;
-    return '<div class="mrow'+(cur?" cur":"")+'" onclick="selMonth(\''+k+'\')">'
-      +'<span>'+lbl+'</span>'+(cur?'<span style="font-size:9px;color:var(--gold);letter-spacing:2px;font-family:monospace;">ACTIVO</span>':'')
-      +'</div>';
-  }).join("");
+    var isCur=k===S.curKey;
+    var div=document.createElement("div");
+    div.className="mrow"+(isCur?" cur":"");
+    div.innerHTML='<span>'+lbl+'</span>'+(isCur?'<span style="font-size:9px;color:var(--gold);letter-spacing:2px;font-family:monospace;">ACTIVO</span>':'');
+    div.onclick=function(key){return function(){selMonth(key);};}(k);
+    mlist.appendChild(div);
+  });
 }
 function selMonth(k){
   S.curKey=k;S.tab="resumen";
@@ -1143,3 +1147,4 @@ function updateAlerta(catId,val){var d=cur();if(!d.alertas)d.alertas={};d.alerta
 </script>
 </body>
 </html>
+ la
