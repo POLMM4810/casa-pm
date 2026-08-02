@@ -165,7 +165,7 @@ select option { background: #16162A !important; color: #E8E0D0 !important; }
     </div>
     <input id="pin-field" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="    " style="font-size:32px;letter-spacing:16px;width:180px;text-align:center;background:#0E0E22;color:#C17D3C;border:1.5px solid #2A2A40;border-radius:14px;padding:14px 20px;caret-color:#C17D3C;outline:none;">
     <div id="pin-err"></div>
-    <button id="faceid-btn" class="faceid-btn" onclick="tryBiometric()" style="display:none;">
+    <button id="faceid-btn" class="faceid-btn" onclick="useBiometric()" style="display:none;opacity:0;">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3H5a2 2 0 0 0-2 2v2M17 3h2a2 2 0 0 1 2 2v2M7 21H5a2 2 0 0 1-2-2v-2M17 21h2a2 2 0 0 0 2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="M9 9a4 4 0 0 1 6 0M9 15a4 4 0 0 0 6 0"/></svg>
       Face ID / Touch ID
     </button>
@@ -356,66 +356,106 @@ function setSyncing(v){
 function setTxt(t){var el=document.getElementById("sync-txt");if(el)el.textContent=t;}
 
 
-// ─── BIOMETRIC (Face ID / Touch ID) ─────────────────────────────────────────
-var CRED_KEY = "pp_cred_id";
-var biometricAvailable = false;
+// ─── BIOMETRIC (Face ID / Touch ID) ──────────────────────────────────────────
+var CRED_LS = "pp_biometric_id";
 
-function checkBiometric(){
-  if(!window.PublicKeyCredential){return;}
-  PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(ok){
-    if(!ok)return;
-    biometricAvailable = true;
-    var btn = document.getElementById("faceid-btn");
-    if(btn){btn.classList.add("available");btn.style.display="flex";}
-    var storedId = localStorage.getItem(CRED_KEY);
-    if(storedId){
-      // Auto-try biometric on load
-      setTimeout(function(){tryBiometric();}, 400);
-    }
-  }).catch(function(){});
+function initBiometric(){
+  var btn = document.getElementById("faceid-btn");
+  if(!btn) return;
+  if(!window.PublicKeyCredential){
+    btn.style.display = "none";
+    return;
+  }
+  PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+    .then(function(available){
+      if(available){
+        btn.style.display = "flex";
+        btn.style.opacity = "1";
+      } else {
+        btn.style.display = "none";
+      }
+    })
+    .catch(function(){ btn.style.display = "none"; });
 }
 
-function tryBiometric(){
-  var storedId = localStorage.getItem(CRED_KEY);
-  if(!storedId || !biometricAvailable){registerBiometric();return;}
-  var idBytes = Uint8Array.from(atob(storedId), function(c){return c.charCodeAt(0);});
-  var challenge = new Uint8Array(32);
-  crypto.getRandomValues(challenge);
-  navigator.credentials.get({publicKey:{
-    challenge: challenge,
-    allowCredentials:[{type:"public-key",id:idBytes,transports:["internal"]}],
-    userVerification:"required",
-    timeout:30000
-  }}).then(function(){
-    unlock();
-  }).catch(function(err){
-    // Silently fail - user can still use PIN
-    console.log("Biometric failed:", err.message);
-  });
+function useBiometric(){
+  var btn = document.getElementById("faceid-btn");
+  var storedId = null;
+  try { storedId = localStorage.getItem(CRED_LS); } catch(e){}
+
+  if(storedId){
+    // Authenticate with existing credential
+    var idBytes;
+    try {
+      idBytes = Uint8Array.from(atob(storedId), function(c){ return c.charCodeAt(0); });
+    } catch(e) {
+      // Bad stored data, re-register
+      localStorage.removeItem(CRED_LS);
+      useBiometric();
+      return;
+    }
+    var challenge = new Uint8Array(32);
+    crypto.getRandomValues(challenge);
+    navigator.credentials.get({
+      publicKey: {
+        challenge: challenge,
+        rpId: location.hostname,
+        allowCredentials: [{ type: "public-key", id: idBytes, transports: ["internal"] }],
+        userVerification: "required",
+        timeout: 60000
+      }
+    }).then(function(cred){
+      if(cred){ unlock(); }
+    }).catch(function(err){
+      // If credential not found, re-register
+      if(err.name === "NotAllowedError" || err.name === "InvalidStateError"){
+        localStorage.removeItem(CRED_LS);
+        registerBiometric();
+      }
+    });
+  } else {
+    registerBiometric();
+  }
 }
 
 function registerBiometric(){
-  if(!biometricAvailable)return;
   var challenge = new Uint8Array(32);
   crypto.getRandomValues(challenge);
-  var userId = new Uint8Array(16);
+  var userId = new Uint8Array(8);
   crypto.getRandomValues(userId);
-  navigator.credentials.create({publicKey:{
-    challenge: challenge,
-    rp:{name:"Gastos App", id:location.hostname},
-    user:{id:userId, name:"usuario", displayName:"Usuario"},
-    pubKeyCredParams:[{alg:-7,type:"public-key"},{alg:-257,type:"public-key"}],
-    authenticatorSelection:{authenticatorAttachment:"platform",userVerification:"required"},
-    timeout:30000
-  }}).then(function(cred){
+
+  navigator.credentials.create({
+    publicKey: {
+      challenge: challenge,
+      rp: { name: "Gastos App", id: location.hostname },
+      user: { id: userId, name: "usuario", displayName: "Usuario" },
+      pubKeyCredParams: [
+        { alg: -7,   type: "public-key" },
+        { alg: -257, type: "public-key" }
+      ],
+      authenticatorSelection: {
+        authenticatorAttachment: "platform",
+        userVerification: "required",
+        residentKey: "discouraged"
+      },
+      timeout: 60000,
+      attestation: "none"
+    }
+  }).then(function(cred){
     var idB64 = btoa(String.fromCharCode.apply(null, new Uint8Array(cred.rawId)));
-    localStorage.setItem(CRED_KEY, idB64);
+    try { localStorage.setItem(CRED_LS, idB64); } catch(e){}
     unlock();
   }).catch(function(err){
-    console.log("Register failed:", err.message);
+    // Show error briefly on the button
+    var btn = document.getElementById("faceid-btn");
+    if(btn){
+      var orig = btn.innerHTML;
+      btn.innerHTML = "⚠️ No disponible en este dispositivo";
+      btn.style.color = "#F0A0A0";
+      setTimeout(function(){ btn.innerHTML = orig; btn.style.color = ""; }, 3000);
+    }
   });
 }
-
 
 // ─── UNDO (historial del día) ─────────────────────────────────────────────
 var undoHistory = [];  // array de {data, label, ts}
@@ -513,7 +553,7 @@ function doUndo(idx){
   document.getElementById("pin").addEventListener("click",function(e){
     if(e.target!==field)field.focus();
   });
-  checkBiometric();
+  initBiometric();
 })();
 
 function unlock(){
@@ -537,7 +577,20 @@ function launch(){
 }
 
 // ─── DATA ──────────────────────────────────────────────────────────────────
-function cur(){return S.months[S.curKey]||emptyMonth();}
+function cur(){
+  var d = S.months[S.curKey];
+  if(!d) d = emptyMonth();
+  // Ensure all required fields exist (defensive for old/corrupted months)
+  if(!d.gastos) d.gastos = {};
+  CATS_BASE.forEach(function(c){ if(!d.gastos[c.id]) d.gastos[c.id] = []; });
+  (S.customCats||[]).forEach(function(c){ if(!d.gastos[c.id]) d.gastos[c.id] = []; });
+  if(!d.vacaciones) d.vacaciones = {lineas:[], miriamPagado:0};
+  if(!d.vacaciones.lineas) d.vacaciones.lineas = [];
+  if(!d.meta) d.meta = {presupuesto:2000, bote:0};
+  if(!d.alertas) d.alertas = {};
+  S.months[S.curKey] = d;
+  return d;
+}
 function saveData(d){S.months[S.curKey]=d;saveLocal();renderAll();fbWrite();}
 
 function totals(){
